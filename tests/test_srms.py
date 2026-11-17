@@ -165,3 +165,25 @@ def test_end_to_end_etl_analytics_visuals_and_exports(db_session):
     # Audit logs recorded
     audit_df = fetch_audit_logs_dataframe(db_session)
     assert not audit_df.empty
+
+
+def test_auto_register_etl_on_empty_db(db_session):
+    upload_df = pd.DataFrame(
+        [
+            {
+                "matric_no": "NEW/2026/001",
+                "course_code": "STA101",
+                "session_name": "2025/2026",
+                "semester_name": "First",
+                "ca_score": 28,
+                "exam_score": 45,
+            }
+        ]
+    )
+    report = validate_score_dataframe(upload_df, db_session, auto_register=True)
+    assert report.is_clean
+    committed = commit_validated_scores(report.valid_df, db_session)
+    assert committed == 1
+    results_df = fetch_results_dataframe(db_session)
+    assert len(results_df) == 1
+    assert results_df.iloc[0]["grade_letter"] == "A"

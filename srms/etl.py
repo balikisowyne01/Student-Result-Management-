@@ -11,7 +11,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from srms.database import Course, Semester, Student
-from srms.repository import log_audit, upsert_result
+from srms.repository import (
+    get_or_create_semester,
+    log_audit,
+    upsert_course,
+    upsert_result,
+    upsert_student,
+)
 
 REQUIRED_SCORE_COLUMNS = {
     "matric_no",
@@ -78,8 +84,14 @@ def load_tabular_file(file_obj: BinaryIO, filename: str) -> pd.DataFrame:
     return df
 
 
-def validate_score_dataframe(df: pd.DataFrame, session: Session) -> ValidationReport:
-    """Validate uploaded score rows against schema rules and database references."""
+def validate_score_dataframe(
+    df: pd.DataFrame, session: Session, auto_register: bool = False
+) -> ValidationReport:
+    """Validate uploaded score rows against schema rules and database references.
+
+    When auto_register=True, unknown matric_no, course_code, and semesters are
+    accepted in the preview and automatically created upon commit.
+    """
     missing_cols = REQUIRED_SCORE_COLUMNS - set(df.columns)
     if missing_cols:
         raise ValueError(f"Missing required columns: {', '.join(sorted(missing_cols))}")
@@ -117,15 +129,17 @@ def validate_score_dataframe(df: pd.DataFrame, session: Session) -> ValidationRe
 
         if not matric or matric == "NAN":
             reasons.append("Missing matric_no")
-        elif matric not in known_students:
+        elif not auto_register and matric not in known_students:
             reasons.append(f"Unknown matric_no '{matric}'")
 
         if not course_code or course_code == "NAN":
             reasons.append("Missing course_code")
-        elif course_code not in known_courses:
+        elif not auto_register and course_code not in known_courses:
             reasons.append(f"Unknown course_code '{course_code}'")
 
-        if (sess_name, sem_name) not in known_semesters:
+        if not sess_name or sess_name == "NAN" or not sem_name or sem_name == "NAN":
+            reasons.append("Missing session_name or semester_name")
+        elif not auto_register and (sess_name, sem_name) not in known_semesters:
             reasons.append(f"Unknown semester '{sess_name} - {sem_name}'")
 
         key = (matric, course_code, sess_name, sem_name)
@@ -157,14 +171,25 @@ def validate_score_dataframe(df: pd.DataFrame, session: Session) -> ValidationRe
             err["validation_error"] = "; ".join(reasons)
             error_rows.append(err)
         else:
+            full_name_val = row.get("full_name")
+            dept_val = row.get("department")
+            level_val = row.get("level")
+            title_val = row.get("course_title")
+            units_val = row.get("credit_units")
+
             valid_rows.append(
                 {
                     "row_number": int(row["row_number"]),
-                    "student_id": known_students[matric],
+                    "student_id": known_students.get(matric),
                     "matric_no": matric,
-                    "course_id": known_courses[course_code],
+                    "full_name": str(full_name_val).strip() if pd.notna(full_name_val) and str(full_name_val).strip() else matric,
+                    "department": str(dept_val).strip() if pd.notna(dept_val) and str(dept_val).strip() else "General",
+                    "level": int(level_val) if pd.notna(level_val) else 100,
+                    "course_id": known_courses.get(course_code),
                     "course_code": course_code,
-                    "semester_id": known_semesters[(sess_name, sem_name)],
+                    "course_title": str(title_val).strip() if pd.notna(title_val) and str(title_val).strip() else course_code,
+                    "credit_units": int(units_val) if pd.notna(units_val) else 3,
+                    "semester_id": known_semesters.get((sess_name, sem_name)),
                     "session_name": sess_name,
                     "semester_name": sem_name,
                     "ca_score": round(ca, 2),
@@ -189,11 +214,46 @@ def commit_validated_scores(
 
     count = 0
     for _, row in valid_df.iterrows():
+        sid = row.get("student_id")
+        if pd.isna(sid) or sid is None:
+            student = upsert_student(
+                session=session,
+                matric_no=str(row["matric_no"]),
+                full_name=str(row.get("full_name") or row["matric_no"]),
+                department=str(row.get("department") or "General"),
+                level=int(row.get("level") or 100),
+                actor=actor,
+            )
+            sid = student.id
+
+        cid = row.get("course_id")
+        if pd.isna(cid) or cid is None:
+            course = upsert_course(
+                session=session,
+                course_code=str(row["course_code"]),
+                course_title=str(row.get("course_title") or row["course_code"]),
+                credit_units=int(row.get("credit_units") or 3),
+                department=str(row.get("department") or "General"),
+                level=int(row.get("level") or 100),
+                actor=actor,
+            )
+            cid = course.id
+
+        sem_id = row.get("semester_id")
+        if pd.isna(sem_id) or sem_id is None:
+            semester = get_or_create_semester(
+                session=session,
+                session_name=str(row["session_name"]),
+                semester_name=str(row["semester_name"]),
+                actor=actor,
+            )
+            sem_id = semester.id
+
         upsert_result(
             session=session,
-            student_id=int(row["student_id"]),
-            course_id=int(row["course_id"]),
-            semester_id=int(row["semester_id"]),
+            student_id=int(sid),
+            course_id=int(cid),
+            semester_id=int(sem_id),
             ca_score=float(row["ca_score"]),
             exam_score=float(row["exam_score"]),
             actor=actor,

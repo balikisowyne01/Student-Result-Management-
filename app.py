@@ -244,11 +244,17 @@ with SessionLocal() as session:
             mime="text/csv",
         )
 
+        auto_register = st.checkbox(
+            "Auto-register missing Students, Courses & Semesters found in this file",
+            value=True,
+            help="Uncheck to strictly require Students, Courses, and Semesters to be pre-registered.",
+        )
+
         uploaded = st.file_uploader("Upload Score Sheet (.csv or .xlsx)", type=["csv", "xlsx", "xls"])
         if uploaded is not None:
             try:
                 raw_df = load_tabular_file(uploaded, uploaded.name)
-                report = validate_score_dataframe(raw_df, session)
+                report = validate_score_dataframe(raw_df, session, auto_register=auto_register)
 
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Total Rows", report.total_rows)
